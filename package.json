@@ -9,7 +9,8 @@
     "start": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "mcp": "tsx src/mcp.ts"
+    "mcp": "tsx src/mcp.ts",
+    "mcp:smartspec": "tsx src/smartspec-mcp-stdio.ts"
   },
   "engines": {
     "node": ">=22.13"

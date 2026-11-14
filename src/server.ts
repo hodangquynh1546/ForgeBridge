@@ -5,6 +5,8 @@ import { LinkRequiredError, NotFoundError, ProjectNotLinkedError, type SyncEngin
 import type { Reconciler } from "./reconcile.js";
 import { WorkHubError, type WorkHubClient } from "./workhub.js";
 import { ideRouter } from "./ide.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { SmartSpecClient, buildSmartSpecServer } from "./smartspec-mcp.js";
 import { interpretPullRequest, verifyGithubSignature } from "./github.js";
 import type { Store } from "./store.js";
 
@@ -69,6 +71,22 @@ export function createServer(cfg: Config, engine: SyncEngine, reconciler: Reconc
       res.json({ status: d.status ?? "unavailable", fullName: d.name, emailVerified: d.emailVerified, passwordChangedAt: d.passwordChangedAt });
     } catch {
       res.json({ status: "unavailable" });
+    }
+  });
+
+  // SmartSpec MCP over HTTP (stateless): each request carries the caller's own SmartSpec token, so every tool acts with
+  // that person's access. Add it with: claude mcp add --transport http smartspec <bridge>/mcp/smartspec --header "Authorization: Bearer ssp_…"
+  app.all("/mcp/smartspec", async (req, res) => {
+    const token = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "");
+    if (!token.startsWith("ssp_")) return void res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Cần token SmartSpec (ssp_…) trong header Authorization" }, id: null });
+    const server = buildSmartSpecServer(new SmartSpecClient(cfg.smartspecApi, token));
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => { void transport.close(); void server.close(); });
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (e: any) {
+      if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: e?.message ?? "MCP error" }, id: null });
     }
   });
 
