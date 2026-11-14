@@ -10,6 +10,7 @@ export class Reconciler {
   private timers = new Map<string, NodeJS.Timeout>();
   private lastSprint = new Map<string, string>();
   private sweep?: NodeJS.Timeout;
+  private discoverTimer?: NodeJS.Timeout;
 
   constructor(private engine: SyncEngine, private notify: Notifier, private log: (m: string) => void = console.warn) {}
 
@@ -23,6 +24,7 @@ export class Reconciler {
 
   /** Reads the project now and tells SmartSpec what changed. Returns the number of changed use cases. */
   async run(ssProjectId: string, force = false): Promise<number> {
+    await this.engine.syncProjectMeta(ssProjectId).catch((e) => this.log(`meta ${ssProjectId} failed: ${e?.message ?? e}`));
     const batch = await this.engine.pullProject(ssProjectId);
     if (!batch) return 0;
     const sprintJson = JSON.stringify(batch.activeSprint);
@@ -32,8 +34,17 @@ export class Reconciler {
     return batch.items.length;
   }
 
+  /** A project we do not know yet changed in WorkHub: maybe a person just created it there. */
+  discover(delayMs = 2_500) {
+    clearTimeout(this.discoverTimer);
+    this.discoverTimer = setTimeout(() => {
+      this.engine.discoverProjects().then((n) => { if (n) for (const id of this.engine.linkedProjectIds()) this.schedule(id, 0); }).catch((e) => this.log(`discover failed: ${e?.message ?? e}`));
+    }, delayMs);
+  }
+
   start(everyMs: number) {
     const all = () => {
+      this.discover(0);
       for (const id of this.engine.linkedProjectIds()) this.schedule(id, 0);
     };
     setTimeout(all, 5_000);

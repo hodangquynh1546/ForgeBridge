@@ -58,6 +58,11 @@ export class WorkHubClient {
     return this.raw("POST", "/api/integrations/identity/set-password", { email, password });
   }
 
+  /** One-time ticket that signs this person into the WorkHub web app (see WorkHub SsoTickets). */
+  async ssoTicket(email: string): Promise<string> {
+    return (await this.raw("POST", "/api/integrations/sso-ticket", { email })).ticket;
+  }
+
   private async access(pat: string): Promise<string> {
     const hit = this.cache.get(pat);
     if (hit && hit.exp > Date.now() + 30_000) return hit.token;

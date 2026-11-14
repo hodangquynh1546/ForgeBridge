@@ -80,5 +80,6 @@ export function openDb(path: string): Db {
   addColumns('entity_links', ['spec_json TEXT', 'progress_json TEXT']);
   addColumns('project_links', ['paused INTEGER NOT NULL DEFAULT 0', 'archived INTEGER NOT NULL DEFAULT 0', 'wh_prev_status TEXT']);
   addColumns('user_links', ['token_id TEXT']);
+  addColumns('project_links', ['base_name TEXT', 'base_desc TEXT']); // last name/description both systems agreed on (three-way merge)
   return db;
 }

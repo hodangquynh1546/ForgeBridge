@@ -89,6 +89,8 @@ const MEMBER_ROLE = { editor: "DEVELOPER", viewer: "STAKEHOLDER" } as const;
 /** Computes what to create/update in WorkHub for a SmartSpec snapshot, and reads progress back. SmartSpec owns spec text; WorkHub owns progress. */
 export class SyncEngine {
   private chains = new Map<string, Promise<unknown>>();
+  /** Number of WorkHub projects being created by us right now: discovery must not mistake them for people's projects. */
+  private provisioning = 0;
 
   constructor(private cfg: Config, private store: Store, private wh: WorkHubClient) {}
 
@@ -242,6 +244,7 @@ export class SyncEngine {
     if (input.design) design = await this.syncDesign(link, input.design, input.version.number).catch((e) => { console.warn("design sync failed:", e?.message ?? e); return undefined; });
     if (input.members) await this.syncMembers(link, input.members).catch((e) => console.warn("member sync failed:", e?.message ?? e));
 
+    if (!provisioned) await this.syncProjectMeta(project.id).catch((e) => console.warn("project meta sync failed:", e?.message ?? e));
     this.store.markSynced(project.id, input.version.number ?? input.version.id);
     this.store.log(project.id, "ss→wh", `v${input.version.number ?? "?"}: +${stats.created} tạo, ${stats.updated} cập nhật, ${stats.flagged} cảnh báo, ${stats.unchanged} giữ nguyên`);
     return { workhub: this.workhubRef(this.store.project(project.id)!), ...stats, provisioned, design };
@@ -308,6 +311,15 @@ export class SyncEngine {
   }
 
   private async provision(input: SyncInput) {
+    this.provisioning++;
+    try {
+      return await this.provisionInner(input);
+    } finally {
+      this.provisioning--;
+    }
+  }
+
+  private async provisionInner(input: SyncInput) {
     const u = this.store.user(input.actorSsUserId)!;
     const pat = this.pat(input.actorSsUserId);
     let workspaceId = u.wh_workspace_id;
@@ -354,6 +366,7 @@ export class SyncEngine {
       wh_project_id: project.id,
       wh_project_key: project.key,
     });
+    this.store.setBase(input.project.id, String(project.name ?? input.project.name), String(project.description ?? ""));
     return this.store.project(input.project.id)!;
   }
 
@@ -566,6 +579,78 @@ export class SyncEngine {
       items,
       activeSprint: active ? { name: active.name, goal: active.goal ?? null, startDate: active.startDate ?? null, endDate: active.endDate ?? null } : null,
     };
+  }
+
+  // ---------- project name/description/members (both directions) and projects created in WorkHub ----------
+
+  private async ss(path: string, body: unknown): Promise<any> {
+    const res = await fetch(`${this.cfg.smartspecApi}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge-Key": this.cfg.secret },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`SmartSpec answered ${res.status} for ${path}`);
+    return res.json();
+  }
+
+  /**
+   * Keeps name, description and members equal on both sides. Three-way: whoever changed since the last agreed value wins
+   * (SmartSpec on a tie); members only ever get added here.
+   */
+  async syncProjectMeta(ssProjectId: string): Promise<boolean> {
+    const link = this.store.project(ssProjectId);
+    if (!link || link.paused || link.archived || !this.store.user(link.owner_ss_user_id)) return false;
+    const pat = this.pat(link.owner_ss_user_id);
+    const p = await this.wh.call(pat, "GET", `/api/projects/${link.wh_project_id}`);
+    if (p.status === "ARCHIVED") return false;
+    const members: any[] = await this.wh.call(pat, "GET", `/api/projects/${link.wh_project_id}/members`).catch(() => []);
+    const whName = String(p.name ?? ""), whDesc = String(p.description ?? "");
+    const r = await this.ss("/api/integrations/workhub/project-upsert", {
+      ssProjectId,
+      wh: { name: whName, description: whDesc },
+      base: link.base_name == null ? null : { name: link.base_name, description: link.base_desc ?? "" },
+      members: members.map((m) => ({ email: m.email, role: m.role })),
+    });
+    const name = String(r.name ?? whName), desc = String(r.description ?? whDesc);
+    let changed = !!r.changed;
+    if (name !== whName || desc !== whDesc) {
+      await this.wh.call(pat, "PUT", `/api/projects/${link.wh_project_id}`, {
+        name: name.slice(0, 100), description: desc.slice(0, 2000) || null,
+        startDate: p.startDate ?? null, endDate: p.endDate ?? null, methodology: p.methodology ?? "SCRUM",
+      });
+      this.store.log(ssProjectId, "ss→wh", `đổi tên/mô tả dự án: "${name}"`);
+      changed = true;
+    }
+    this.store.setBase(ssProjectId, name, desc);
+    return changed;
+  }
+
+  /**
+   * Projects people created in WorkHub get a SmartSpec counterpart (owned by the creator, who must have linked a
+   * SmartSpec account). Runs after a webhook for an unknown project and on every sweep.
+   */
+  async discoverProjects(): Promise<number> {
+    if (this.provisioning > 0) return 0;
+    let created = 0;
+    for (const u of this.store.allUsers()) {
+      let mine: any[];
+      try { mine = await this.wh.call(decrypt(u.token_enc, this.cfg.secret), "GET", "/api/me/projects"); } catch { continue; }
+      for (const p of mine) {
+        if (!p.mine || p.status === "ARCHIVED" || this.store.projectByWorkhubId(p.id) || this.provisioning > 0) continue;
+        const r = await this.ss("/api/integrations/workhub/project-upsert", { create: true, ownerSsUserId: u.ss_user_id, name: p.name, description: p.description ?? "" });
+        if (!r.ssProjectId) continue;
+        this.store.saveProject({
+          ss_project_id: r.ssProjectId, owner_ss_user_id: u.ss_user_id, wh_workspace_id: p.workspaceId, wh_team_id: p.teamId,
+          wh_project_id: p.id, wh_project_key: p.key,
+        });
+        this.store.setBase(r.ssProjectId, String(p.name ?? ""), String(p.description ?? ""));
+        this.store.log(r.ssProjectId, "wh→ss", `dự án "${p.name}" tạo ở WorkHub → tạo bên SmartSpec`);
+        await this.syncProjectMeta(r.ssProjectId).catch(() => undefined); // brings members over
+        created++;
+      }
+    }
+    return created;
   }
 
   /** Every linked project, used by the periodic reconciliation. */

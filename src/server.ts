@@ -23,6 +23,7 @@ export function createServer(cfg: Config, engine: SyncEngine, reconciler: Reconc
     const evt = JSON.parse(body.toString("utf8"));
     const ssProjectId = evt.type === "project.changed" ? engine.ssProjectOfWorkhub(String(evt.projectId)) : undefined;
     if (ssProjectId) reconciler.schedule(ssProjectId); // read the real state; the event itself carries no data
+    else if (evt.type === "project.changed") reconciler.discover(); // unknown project: maybe created in WorkHub just now
     res.status(204).end();
   });
 
@@ -120,6 +121,16 @@ export function createServer(cfg: Config, engine: SyncEngine, reconciler: Reconc
   }));
 
   app.get("/v1/users/:id", h((req, res) => res.json(engine.userStatus(String(req.params.id)))));
+
+  // "Open WorkHub" from SmartSpec: a URL that signs the browser into WorkHub as the same person, then goes to `next`.
+  app.post("/v1/users/:id/sso", h(async (req, res) => {
+    const u = store.user(String(req.params.id));
+    if (!u) throw new LinkRequiredError("User has not linked a WorkHub account");
+    const raw = String(req.body?.next ?? "/workspaces");
+    const next = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/workspaces";
+    const ticket = await wh.ssoTicket(u.email);
+    res.json({ url: `${cfg.workhubPublic}/sso?ticket=${encodeURIComponent(ticket)}&next=${encodeURIComponent(next)}` });
+  }));
 
   app.post("/v1/users/:id/link", h(async (req, res) => {
     const { email, password, register, fullName } = req.body ?? {};

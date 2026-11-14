@@ -18,6 +18,8 @@ export interface ProjectLink {
   wh_project_key: string;
   last_synced_at: string | null;
   last_version: string | null;
+  base_name: string | null;
+  base_desc: string | null;
   paused: number;
   archived: number;
   wh_prev_status: string | null;
@@ -79,7 +81,16 @@ export class Store {
   project(ssProjectId: string) {
     return this.db.prepare("SELECT * FROM project_links WHERE ss_project_id = ?").get(ssProjectId) as unknown as ProjectLink | undefined;
   }
-  saveProject(p: Omit<ProjectLink, "last_synced_at" | "last_version" | "paused" | "archived" | "wh_prev_status">) {
+  allUsers() {
+    return this.db.prepare("SELECT * FROM user_links").all() as unknown as UserLink[];
+  }
+  userByEmail(email: string) {
+    return this.db.prepare("SELECT * FROM user_links WHERE lower(email) = lower(?)").get(email) as unknown as UserLink | undefined;
+  }
+  setBase(ssProjectId: string, name: string, desc: string) {
+    this.db.prepare("UPDATE project_links SET base_name = ?, base_desc = ? WHERE ss_project_id = ?").run(name, desc, ssProjectId);
+  }
+  saveProject(p: Omit<ProjectLink, "last_synced_at" | "last_version" | "paused" | "archived" | "wh_prev_status" | "base_name" | "base_desc">) {
     this.db
       .prepare(
         `INSERT INTO project_links (ss_project_id, owner_ss_user_id, wh_workspace_id, wh_team_id, wh_project_id, wh_project_key, created_at)
