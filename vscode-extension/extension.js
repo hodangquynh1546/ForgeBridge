@@ -105,6 +105,18 @@ function activate(context) {
     await vscode.commands.executeCommand('markdown.showPreviewToSide', doc.uri).then(undefined, () => vscode.window.showTextDocument(doc, { preview: true }));
   });
 
+  reg('forge.openDesign', async (arg) => {
+    const t = await pickTask(arg);
+    if (!t) return;
+    const { documents } = await ide('GET', '/issues/' + encodeURIComponent(t.key) + '/design');
+    if (!documents.length) { vscode.window.showInformationMessage(`Forge: ${t.key} chưa có tài liệu thiết kế từ SmartSpec.`); return; }
+    const pick = documents.length === 1 ? documents[0] : (await vscode.window.showQuickPick(documents.map((d) => ({ label: d.title, description: d.scope === 'use-case' ? 'của use case này' : 'toàn dự án', d })), { placeHolder: 'Chọn tài liệu thiết kế' }) || {}).d;
+    if (!pick) return;
+    const doc = await vscode.workspace.openTextDocument({ language: 'markdown', content: pick.content });
+    await vscode.window.showTextDocument(doc, { preview: true });
+    vscode.window.showInformationMessage('Sơ đồ Mermaid hiển thị khi cài thêm extension "Markdown Preview Mermaid Support", hoặc mở trong WorkHub.', 'Mở trong WorkHub').then((c) => { if (c) vscode.env.openExternal(vscode.Uri.parse(pick.url)); });
+  });
+
   reg('forge.setStatus', async (arg) => {
     const t = await pickTask(arg);
     if (!t) return;

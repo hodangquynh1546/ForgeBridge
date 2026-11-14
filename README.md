@@ -15,8 +15,11 @@ Repo này gồm dịch vụ Bridge (gốc) và extension VS Code (`vscode-extens
 - **SmartSpec → WorkHub**: đặc tả (tên, mô tả, tiêu chí) đẩy tự động; đổi trạng thái ở SmartSpec đi qua WorkHub (WorkHub vẫn là nơi sở hữu dữ liệu + lịch sử) rồi phản chiếu lại ngay. Thành viên dự án SmartSpec được mời/thêm vào dự án WorkHub (editor → Developer, viewer → Stakeholder) để giao việc được ngay; ai chưa có tài khoản WorkHub sẽ được tự thêm khi họ liên kết.
 - **Giao việc / sprint / hạn chót chỉ làm ở WorkHub**, SmartSpec chỉ hiển thị. Task bị xoá ở WorkHub được đánh dấu ở SmartSpec và có nút "Tạo lại task" (không tự tạo lại).
 
+## Thiết kế → Tài liệu WorkHub
+Mỗi lần đồng bộ, SmartSpec gửi kèm các tài liệu sinh từ thiết kế (xem `docs/lifecycle.md`): **SRS**, từng **use case/activity/sequence diagram** (Mermaid), **thiết kế CSDL** (ERD + từ điển + DDL PostgreSQL), **kế hoạch & kết quả kiểm thử**. Bridge tạo thư mục `SmartSpec/…` trong tab Tài liệu, tạo/cập nhật theo hash (mỗi lần đổi là một phiên bản), gắn tài liệu vào task của use case liên quan, lưu trữ tài liệu của sơ đồ đã bị xoá. WorkHub vẽ sơ đồ Mermaid ngay trong tài liệu. Mọi thay đổi sơ đồ/CSDL/test case trong SmartSpec (mọi đường ghi, nhờ hook ở model) tự kích hoạt đồng bộ có debounce. IDE: `GET /ide/issues/:key/design`, MCP `forge_get_design`, lệnh *Forge: Xem thiết kế*.
+
 ## Test case → Bug, thành viên, Git
-- **Test case thất bại → Bug** (`POST /v1/testcases/report`, SmartSpec gọi sau mỗi lần chạy): tạo Bug trong WorkHub (ưu tiên theo severity, nằm dưới Epic của module, có các bước/kỳ vọng/thực tế, trỏ về use case liên quan). Chạy lại vẫn lỗi → bình luận vào bug đó (không tạo trùng); bug đã DONE mà test lại lỗi → **mở lại** về TO_DO; test đạt → ghi chú để người xác nhận đóng bug. Trạng thái bug hiện ngay trên test case (badge) và trên thẻ task của use case.
+- **Test case thất bại → Bug** (`POST /v1/testcases/report`, SmartSpec gọi sau mỗi lần chạy): tạo Bug trong WorkHub (ưu tiên theo severity, nằm dưới Epic của module, có các bước/kỳ vọng/thực tế, trỏ về use case liên quan). Chạy lại vẫn lỗi → bình luận vào bug đó (không tạo trùng); bug đã DONE mà test lại lỗi → **mở lại** về TO_DO; test đạt → ghi chú để người xác nhận đóng bug. Có thể đổi trạng thái bug ngay trên test case (`POST /v1/projects/:id/testcases/:key/status`, đi qua WorkHub). Trạng thái bug hiện ngay trên test case (badge) và trên thẻ task của use case.
 - **Thành viên**: chỉ những người Bridge đã mời mới bị gỡ/đổi vai trò khi họ rời hoặc đổi vai trò ở SmartSpec; người được thêm tay trong WorkHub không bị đụng tới.
 - **GitHub** (`POST /webhooks/github`, event *Pull requests*, `GITHUB_WEBHOOK_SECRET` bắt buộc): branch/tiêu đề/mô tả PR chứa mã task (`SHOP-12`) → mở PR: **Review**; merge: **Kiểm thử** (hoặc DONE nếu `GIT_MERGED_STATUS=DONE`); PR nháp bị bỏ qua; task đã DONE không bị kéo lùi. Chỉ tác động tới task sinh từ SmartSpec.
 
@@ -37,7 +40,7 @@ cp .env.example .env   # đặt BRIDGE_SECRET, WORKHUB_WEBHOOK_SECRET
 npm install
 npm start              # :8090   (Node ≥ 22.13, dùng node:sqlite)
 npm test && npm run typecheck
-node scripts/e2e-full.cjs && node scripts/e2e-bugs.cjs # kiểm tra toàn bộ luồng, cần cả 4 dịch vụ đang chạy (xem bên dưới)
+node scripts/e2e-full.cjs && node scripts/e2e-bugs.cjs && node scripts/e2e-design.cjs # kiểm tra toàn bộ luồng, cần cả 4 dịch vụ đang chạy (xem bên dưới)
 npm run mcp            # MCP server (stdio) cho Claude Code / Copilot
 ```
 

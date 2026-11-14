@@ -62,6 +62,15 @@ server.tool("forge_get_task", "Đọc một task WorkHub cùng đặc tả Smart
   } catch (e) { return fail(e); }
 });
 
+server.tool("forge_get_design", "Đọc tài liệu thiết kế liên quan tới task: sơ đồ (use case/activity/sequence) của use case đó, thiết kế CSDL (ERD + SQL) và SRS. Gọi sau forge_get_task, trước khi viết code.", { key: z.string().describe("Mã task, ví dụ SHOP-12"), maxChars: z.number().optional().describe("Giới hạn ký tự mỗi tài liệu (mặc định 12000)") }, async ({ key, maxChars }) => {
+  try {
+    const { documents } = await api("GET", `/issues/${encodeURIComponent(key)}/design`);
+    if (!documents.length) return text("Task này chưa có tài liệu thiết kế từ SmartSpec.");
+    const limit = maxChars ?? 12000;
+    return text(documents.map((d: any) => `# ${d.title} (${d.scope === "use-case" ? "của use case này" : "toàn dự án"})\n${d.url}\n\n${String(d.content).slice(0, limit)}${String(d.content).length > limit ? "\n…(cắt bớt)" : ""}`).join("\n\n---\n\n"));
+  } catch (e) { return fail(e); }
+});
+
 server.tool("forge_set_status", "Đổi trạng thái task trong WorkHub (đồng bộ ngược về SmartSpec).", { key: z.string(), status: z.enum(["TO_DO", "IN_PROGRESS", "CODE_REVIEW", "TESTING", "DONE"]) }, async ({ key, status }) => {
   try { await api("PUT", `/issues/${encodeURIComponent(key)}/status`, { status }); return text(`${key} → ${status}`); } catch (e) { return fail(e); }
 });

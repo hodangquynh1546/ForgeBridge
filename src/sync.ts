@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { decrypt, encrypt } from "./crypto.js";
+import { decrypt, encrypt, sha256 } from "./crypto.js";
 import { contentHash, moduleSlug, projectKey, toIssueContent, type SsUsecase, moduleOf } from "./mapper.js";
 import { deletedProgress, toProgress, type Progress } from "./progress.js";
 import type { ProjectLink, Store } from "./store.js";
@@ -21,12 +21,23 @@ export interface SsMember {
   role: "owner" | "editor" | "viewer";
 }
 
+export interface DesignDoc {
+  key: string;
+  title: string;
+  type: "SRS" | "TECHNICAL_DESIGN" | "TEST_PLAN";
+  folder: string[];
+  markdown: string;
+  useCaseKeys: string[];
+}
+
 export interface SyncInput {
   actorSsUserId: string;
   project: { id: string; name: string; description?: string };
   version: { id: string; number?: string };
   usecases: SsUsecase[];
   members?: SsMember[];
+  /** null/undefined = SmartSpec could not build them this time: leave WorkHub's documents alone. */
+  design?: DesignDoc[] | null;
 }
 
 export interface SyncResult {
@@ -36,6 +47,7 @@ export interface SyncResult {
   flagged: number;
   unchanged: number;
   provisioned: boolean;
+  design?: { created: number; updated: number; archived: number };
 }
 
 export interface WorkhubRef {
@@ -203,11 +215,13 @@ export class SyncEngine {
       stats.flagged++;
     }
 
+    let design: SyncResult["design"];
+    if (input.design) design = await this.syncDesign(link, input.design, input.version.number).catch((e) => { console.warn("design sync failed:", e?.message ?? e); return undefined; });
     if (input.members) await this.syncMembers(link, input.members).catch((e) => console.warn("member sync failed:", e?.message ?? e));
 
     this.store.markSynced(project.id, input.version.number ?? input.version.id);
     this.store.log(project.id, "ss→wh", `v${input.version.number ?? "?"}: +${stats.created} tạo, ${stats.updated} cập nhật, ${stats.flagged} cảnh báo, ${stats.unchanged} giữ nguyên`);
-    return { workhub: this.workhubRef(this.store.project(project.id)!), ...stats, provisioned };
+    return { workhub: this.workhubRef(this.store.project(project.id)!), ...stats, provisioned, design };
   }
 
   private async ensureEpic(pat: string, pid: string, ssProjectId: string, name: string) {
@@ -329,6 +343,96 @@ export class SyncEngine {
       }
     }
     throw new Error("Could not find a free name in WorkHub");
+  }
+
+  // ---------- design documents (diagrams, ERD, SRS, test plan → WorkHub Documents) ----------
+
+  private async ensureFolder(pat: string, pid: string, path: string[], cache: { id: string; parentId: string | null; name: string }[]): Promise<string | null> {
+    let parent: string | null = null;
+    for (const name of path) {
+      let hit = cache.find((f) => f.name === name && (f.parentId ?? null) === parent);
+      if (!hit) {
+        const created = await this.wh.call(pat, "POST", `/api/projects/${pid}/document-folders`, { name: name.slice(0, 100), parentId: parent });
+        hit = { id: created.id, parentId: parent, name };
+        cache.push(hit);
+      }
+      parent = hit.id;
+    }
+    return parent;
+  }
+
+  private async syncDesign(link: ProjectLink, docs: DesignDoc[], version?: string) {
+    const pat = this.pat(link.owner_ss_user_id);
+    const pid = link.wh_project_id;
+    const ssId = link.ss_project_id;
+    const folders: { id: string; parentId: string | null; name: string }[] = (await this.wh.call(pat, "GET", `/api/projects/${pid}/document-folders`)).map((f: any) => ({ id: f.id, parentId: f.parentId ?? null, name: f.name }));
+    const stat = { created: 0, updated: 0, archived: 0 };
+    const seen = new Set<string>();
+    const issueIdOf = (key: string) => this.store.entity(ssId, "usecase", key)?.wh_issue_id;
+
+    for (const d of docs) {
+      seen.add(d.key);
+      const folderId = await this.ensureFolder(pat, pid, d.folder, folders);
+      const hash = sha256([d.title, d.type, d.folder.join("/"), d.markdown].join("\u0000"));
+      let row = this.store.designLink(ssId, d.key);
+      let docId = row?.wh_doc_id;
+      let changed = false;
+
+      if (row?.archived) {
+        await this.wh.call(pat, "POST", `/api/documents/${docId}/unarchive`).catch(() => { docId = undefined; });
+        if (docId) row = { ...row, archived: 0, content_hash: "" }; // force an update after unarchiving
+      }
+      if (!docId) {
+        const created = await this.wh.call(pat, "POST", `/api/projects/${pid}/documents`, { title: d.title, type: d.type, folderId, content: d.markdown });
+        docId = created.id as string;
+        stat.created++;
+        changed = true;
+        row = undefined;
+      } else if (row!.content_hash !== hash) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const cur = await this.wh.call(pat, "GET", `/api/documents/${docId}`);
+            await this.wh.call(pat, "PUT", `/api/documents/${docId}`, { title: d.title, type: d.type, folderId, content: d.markdown, baseVersion: cur.version, note: `Đồng bộ từ SmartSpec${version ? ` (phiên bản ${version})` : ""}` });
+            stat.updated++;
+            changed = true;
+            break;
+          } catch (e) {
+            if (e instanceof WorkHubError && e.status === 404) {
+              const created = await this.wh.call(pat, "POST", `/api/projects/${pid}/documents`, { title: d.title, type: d.type, folderId, content: d.markdown });
+              docId = created.id as string;
+              row = undefined;
+              stat.created++;
+              changed = true;
+              break;
+            }
+            if (!(e instanceof WorkHubError && e.status === 409 && attempt === 0)) throw e;
+          }
+        }
+      }
+
+      // link the document to the tasks of the use cases it is about (idempotent on the WorkHub side)
+      const linked = new Set<string>(row ? (JSON.parse(row.linked_issues) as string[]) : []);
+      for (const key of d.useCaseKeys) {
+        const issueId = issueIdOf(key);
+        if (!issueId || linked.has(issueId)) continue;
+        await this.wh.call(pat, "POST", `/api/documents/${docId}/links`, { targetType: "ISSUE", targetId: issueId }).then(() => linked.add(issueId)).catch(() => undefined);
+      }
+      this.store.saveDesignLink({
+        ss_project_id: ssId, doc_key: d.key, wh_doc_id: docId!, title: d.title, doc_type: d.type, content_hash: hash,
+        use_case_keys: JSON.stringify(d.useCaseKeys), linked_issues: JSON.stringify([...linked]), archived: 0,
+      });
+      void changed;
+    }
+
+    // artifacts that no longer exist in SmartSpec: archive (kept, read-only), never delete
+    for (const r of this.store.designLinks(ssId)) {
+      if (seen.has(r.doc_key) || r.archived) continue;
+      await this.wh.call(pat, "POST", `/api/documents/${r.wh_doc_id}/archive`).catch(() => undefined);
+      this.store.saveDesignLink({ ...r, archived: 1 });
+      stat.archived++;
+    }
+    if (stat.created || stat.updated || stat.archived) this.store.log(ssId, "ss→wh", `Tài liệu thiết kế: +${stat.created} tạo, ${stat.updated} cập nhật, ${stat.archived} lưu trữ`);
+    return stat;
   }
 
   // ---------- members (SmartSpec project members → WorkHub project members) ----------
@@ -453,10 +557,10 @@ export class SyncEngine {
    * Changing status in SmartSpec goes through WorkHub, which stays the owner of the data (and of the history). The
    * acting person's own link is used when they have one and are a member, otherwise the project owner's.
    */
-  async changeStatus(ssProjectId: string, ssKey: string, status: string, actorSsUserId: string): Promise<Progress> {
+  async changeStatus(ssProjectId: string, ssKey: string, status: string, actorSsUserId: string, kind: "usecase" | "testcase" = "usecase"): Promise<Progress> {
     const link = this.store.project(ssProjectId);
-    const e = this.store.entity(ssProjectId, "usecase", ssKey);
-    if (!link || !e) throw new NotFoundError("Use case chưa có task trong WorkHub");
+    const e = this.store.entity(ssProjectId, kind, ssKey);
+    if (!link || !e) throw new NotFoundError(kind === "testcase" ? "Test case chưa có bug trong WorkHub" : "Use case chưa có task trong WorkHub");
     const tokens: string[] = [];
     if (this.store.user(actorSsUserId)) tokens.push(this.pat(actorSsUserId));
     tokens.push(this.pat(link.owner_ss_user_id));
@@ -465,7 +569,7 @@ export class SyncEngine {
       try {
         const issue = await this.wh.call(pat, "PUT", `/api/issues/${e.wh_issue_id}/status`, { status });
         const progress = toProgress(issue, this.cfg.workhubPublic);
-        this.store.setProgressJson(ssProjectId, ssKey, JSON.stringify(progress), progress.status, progress.assignee?.name ?? null, progress.sprint?.name ?? null, progress.blocked);
+        this.store.setProgressJson(ssProjectId, ssKey, JSON.stringify(progress), progress.status, progress.assignee?.name ?? null, progress.sprint?.name ?? null, progress.blocked, kind);
         this.store.log(ssProjectId, "ss→wh", `${e.wh_key} → ${status} (đổi từ SmartSpec)`);
         return progress;
       } catch (err) {

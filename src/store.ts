@@ -18,6 +18,18 @@ export interface ProjectLink {
   last_synced_at: string | null;
   last_version: string | null;
 }
+export interface DesignLink {
+  ss_project_id: string;
+  doc_key: string;
+  wh_doc_id: string;
+  title: string;
+  doc_type: string;
+  content_hash: string;
+  use_case_keys: string; // JSON string[]
+  linked_issues: string; // JSON string[] of WorkHub issue ids already linked
+  archived: number;
+}
+
 export interface EntityLink {
   ss_project_id: string;
   kind: "module" | "usecase" | "testcase";
@@ -139,6 +151,23 @@ export class Store {
   }
   setRemoved(ssProjectId: string, kind: string, key: string, removed: boolean) {
     this.db.prepare("UPDATE entity_links SET removed=? WHERE ss_project_id=? AND kind=? AND ss_key=?").run(removed ? 1 : 0, ssProjectId, kind, key);
+  }
+
+  designLinks(ssProjectId: string) {
+    return this.db.prepare("SELECT * FROM design_links WHERE ss_project_id = ?").all(ssProjectId) as unknown as DesignLink[];
+  }
+  designLink(ssProjectId: string, key: string) {
+    return this.db.prepare("SELECT * FROM design_links WHERE ss_project_id = ? AND doc_key = ?").get(ssProjectId, key) as unknown as DesignLink | undefined;
+  }
+  saveDesignLink(d: Omit<DesignLink, "archived"> & { archived?: number }) {
+    this.db.prepare(`INSERT INTO design_links (ss_project_id, doc_key, wh_doc_id, title, doc_type, content_hash, use_case_keys, linked_issues, archived)
+      VALUES (?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(ss_project_id, doc_key) DO UPDATE SET wh_doc_id=excluded.wh_doc_id, title=excluded.title, doc_type=excluded.doc_type,
+        content_hash=excluded.content_hash, use_case_keys=excluded.use_case_keys, linked_issues=excluded.linked_issues, archived=excluded.archived`)
+      .run(d.ss_project_id, d.doc_key, d.wh_doc_id, d.title, d.doc_type, d.content_hash, d.use_case_keys, d.linked_issues, d.archived ?? 0);
+  }
+  designLinksForUseCase(ssProjectId: string, useCaseKey: string) {
+    return this.designLinks(ssProjectId).filter((d) => !d.archived && (JSON.parse(d.use_case_keys) as string[]).includes(useCaseKey));
   }
 
   log(ssProjectId: string | null, direction: "ss→wh" | "wh→ss", summary: string) {

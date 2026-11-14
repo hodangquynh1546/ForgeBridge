@@ -74,6 +74,22 @@ export function ideRouter(cfg: Config, store: Store, wh: WorkHubClient) {
     });
   }));
 
+  /** Design documents for a task: the ones about its use case plus the project-wide ones (SRS, database design). */
+  r.get("/issues/:key/design", h(async (req, res, pat) => {
+    const { issue } = await find(pat, String(req.params.key));
+    const link = store.entityByIssue(issue.id);
+    if (!link) return void res.json({ documents: [] });
+    const own = store.designLinksForUseCase(link.ss_project_id, link.ss_key);
+    const general = store.designLinks(link.ss_project_id).filter((d) => !d.archived && (d.doc_key === "srs" || d.doc_key.startsWith("erd:")));
+    const seen = new Set<string>();
+    const wanted = [...own, ...general].filter((d) => (seen.has(d.doc_key) ? false : (seen.add(d.doc_key), true)));
+    const documents = await Promise.all(wanted.map(async (d) => {
+      const doc = await wh.call(pat, "GET", `/api/documents/${d.wh_doc_id}`).catch(() => null);
+      return { key: d.doc_key, title: d.title, type: d.doc_type, url: `${cfg.workhubPublic}/projects/${issue.projectId}/documents/${d.wh_doc_id}`, scope: own.includes(d) ? "use-case" : "project", content: doc?.content ?? null };
+    }));
+    res.json({ documents: documents.filter((d) => d.content !== null) });
+  }));
+
   r.put("/issues/:key/status", h(async (req, res, pat) => {
     const status = String(req.body?.status ?? "");
     if (!["TO_DO", "IN_PROGRESS", "CODE_REVIEW", "TESTING", "DONE"].includes(status)) return void res.status(400).json({ code: "BAD_STATUS", message: "Trạng thái không hợp lệ" });

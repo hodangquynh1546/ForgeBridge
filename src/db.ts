@@ -52,6 +52,18 @@ export function openDb(path: string): Db {
       wh_invitation_id TEXT,
       PRIMARY KEY (ss_project_id, email)
     );
+    CREATE TABLE IF NOT EXISTS design_links (
+      ss_project_id TEXT NOT NULL,
+      doc_key       TEXT NOT NULL,         -- kind:slug, stable across versions
+      wh_doc_id     TEXT NOT NULL,
+      title         TEXT NOT NULL,
+      doc_type      TEXT NOT NULL,
+      content_hash  TEXT NOT NULL,
+      use_case_keys TEXT NOT NULL DEFAULT '[]',
+      linked_issues TEXT NOT NULL DEFAULT '[]',
+      archived      INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (ss_project_id, doc_key)
+    );
     CREATE TABLE IF NOT EXISTS sync_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       at TEXT NOT NULL,

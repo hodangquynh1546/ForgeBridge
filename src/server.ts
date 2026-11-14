@@ -86,6 +86,14 @@ export function createServer(cfg: Config, engine: SyncEngine, reconciler: Reconc
     res.json(await engine.changeStatus(String(req.params.id), String(req.params.key), status, actorSsUserId));
   }));
 
+  app.post("/v1/projects/:id/testcases/:key/status", h(async (req, res) => {
+    const { status, actorSsUserId } = req.body ?? {};
+    if (!["TO_DO", "IN_PROGRESS", "CODE_REVIEW", "TESTING", "DONE"].includes(status) || !actorSsUserId) {
+      return void res.status(400).json({ code: "BAD_REQUEST", message: "status và actorSsUserId là bắt buộc" });
+    }
+    res.json(await engine.changeStatus(String(req.params.id), String(req.params.key), status, actorSsUserId, "testcase"));
+  }));
+
   app.post("/v1/projects/:id/items/:key/recreate", h(async (req, res) => {
     res.json(await engine.recreate(String(req.params.id), String(req.params.key)));
   }));
