@@ -25,6 +25,7 @@ export class Reconciler {
   /** Reads the project now and tells SmartSpec what changed. Returns the number of changed use cases. */
   async run(ssProjectId: string, force = false): Promise<number> {
     await this.engine.syncProjectMeta(ssProjectId).catch((e) => this.log(`meta ${ssProjectId} failed: ${e?.message ?? e}`));
+    await this.engine.pullSpec(ssProjectId).catch((e) => this.log(`spec ${ssProjectId} failed: ${e?.message ?? e}`));
     const batch = await this.engine.pullProject(ssProjectId);
     if (!batch) return 0;
     const sprintJson = JSON.stringify(batch.activeSprint);

@@ -36,6 +36,16 @@ const until = async (fn, ms = 40000) => { const t = Date.now(); while (Date.now(
   ok(wp.id, "project created in WorkHub");
   const found = await until(async () => (await S("GET", "/api/projects/myproject")).data?.find((p) => p.name === "E2E WH " + tag));
   ok(found, "project created in WorkHub appears in SmartSpec");
+  // 5. archived ("deleted") in WorkHub → trashed in SmartSpec; reopened → restored
+  const trashed = async () => (await S("GET", `/api/projects/${created._id}`)).data;
+  const isTrashed = async () => { const d = await trashed(); const pr = d?.project ?? d; return !!pr?.status?.is_trashed; };
+  await W("PUT", `/api/projects/${whId}/status`, { status: "ARCHIVED" });
+  ok(await until(isTrashed), "project archived in WorkHub goes to the SmartSpec trash");
+  await W("PUT", `/api/projects/${whId}/status`, { status: "ACTIVE" });
+  ok(await until(async () => !(await isTrashed())), "project reopened in WorkHub is restored in SmartSpec");
+  // 6. deleted (trashed) in SmartSpec → archived in WorkHub
+  await S("DELETE", `/api/projects/${created._id}`);
+  ok(await until(async () => (await W("GET", `/api/projects/${whId}`)).status === "ARCHIVED"), "project deleted in SmartSpec is archived in WorkHub");
   console.log(`projects e2e: pass=${pass} fail=${fail}`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log("CRASH", e); process.exit(1); });

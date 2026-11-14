@@ -173,6 +173,9 @@ export class Store {
   setSpec(ssProjectId: string, kind: string, key: string, spec: unknown) {
     this.db.prepare("UPDATE entity_links SET spec_json=? WHERE ss_project_id=? AND kind=? AND ss_key=?").run(JSON.stringify(spec), ssProjectId, kind, key);
   }
+  deleteEntity(ssProjectId: string, kind: string, key: string) {
+    this.db.prepare("DELETE FROM entity_links WHERE ss_project_id=? AND kind=? AND ss_key=?").run(ssProjectId, kind, key);
+  }
   setRemoved(ssProjectId: string, kind: string, key: string, removed: boolean) {
     this.db.prepare("UPDATE entity_links SET removed=? WHERE ss_project_id=? AND kind=? AND ss_key=?").run(removed ? 1 : 0, ssProjectId, kind, key);
   }

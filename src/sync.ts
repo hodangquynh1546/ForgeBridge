@@ -1,8 +1,9 @@
 import type { Config } from "./config.js";
 import { decrypt, encrypt, sha256 } from "./crypto.js";
 import { contentHash, moduleSlug, projectKey, toIssueContent, type SsUsecase, moduleOf } from "./mapper.js";
+import { diffStory, parseStory } from "./inbound.js";
 import { deletedProgress, toProgress, type Progress } from "./progress.js";
-import type { ProjectLink, Store } from "./store.js";
+import type { EntityLink, ProjectLink, Store } from "./store.js";
 import { WorkHubClient, WorkHubError } from "./workhub.js";
 
 export class LinkRequiredError extends Error {
@@ -46,6 +47,7 @@ export interface SyncResult {
   updated: number;
   flagged: number;
   unchanged: number;
+  deleted?: number;
   provisioned: boolean;
   paused?: boolean;
   design?: { created: number; updated: number; archived: number };
@@ -187,7 +189,7 @@ export class SyncEngine {
     }
     const pat = this.pat(link.owner_ss_user_id);
     const pid = link.wh_project_id;
-    const stats = { created: 0, updated: 0, flagged: 0, unchanged: 0 };
+    const stats = { created: 0, updated: 0, flagged: 0, unchanged: 0, deleted: 0 };
     const seen = new Set<string>();
 
     // Modules → epics
@@ -227,17 +229,34 @@ export class SyncEngine {
       stats.updated++;
     }
 
-    // Use cases that left the spec: flag once, never delete (work may already be done)
+    // Use cases that left the spec (deleted, or a creation that was undone): the WorkHub task is deleted too, whatever its
+    // state (taken out of its sprint and with its sub-tasks first) — deleting in SmartSpec needs no confirmation in WorkHub.
+    // Only if WorkHub refuses is it kept and flagged with a comment.
     for (const e of this.store.entities(project.id, "usecase")) {
       if (seen.has(e.ss_key) || e.removed) continue;
+      if (await this.deleteIssueDeep(pat, e.wh_issue_id)) {
+        this.store.deleteEntity(project.id, "usecase", e.ss_key);
+        this.store.log(project.id, "ss→wh", `xoá task ${e.wh_key} vì use case không còn trong đặc tả`);
+        stats.deleted++;
+        continue;
+      }
       await this.wh
         .call(pat, "POST", `/api/issues/${e.wh_issue_id}/comments`, {
-          body: `⚠️ Use case này không còn trong đặc tả SmartSpec (phiên bản ${input.version.number ?? input.version.id}). Hãy xác nhận có còn cần làm không.`,
+          body: `⚠️ Use case này không còn trong đặc tả SmartSpec (phiên bản ${input.version.number ?? input.version.id}) nhưng không xoá được task này — hãy xác nhận có còn cần làm không.`,
           mentions: [],
         })
         .catch(() => undefined);
       this.store.setRemoved(project.id, "usecase", e.ss_key, true);
       stats.flagged++;
+    }
+    // A module (epic) with no use cases left goes too, when it is empty.
+    const liveModules = new Set(input.usecases.filter((u) => u.type !== "epic").map((u) => moduleSlug(moduleOf(u))));
+    for (const m of this.store.entities(project.id, "module")) {
+      if (liveModules.has(m.ss_key)) continue;
+      if (await this.tryDeleteIssue(pat, m.wh_issue_id)) {
+        this.store.deleteEntity(project.id, "module", m.ss_key);
+        this.store.log(project.id, "ss→wh", `xoá epic ${m.wh_key} vì module không còn use case`);
+      }
     }
 
     let design: SyncResult["design"];
@@ -246,8 +265,42 @@ export class SyncEngine {
 
     if (!provisioned) await this.syncProjectMeta(project.id).catch((e) => console.warn("project meta sync failed:", e?.message ?? e));
     this.store.markSynced(project.id, input.version.number ?? input.version.id);
-    this.store.log(project.id, "ss→wh", `v${input.version.number ?? "?"}: +${stats.created} tạo, ${stats.updated} cập nhật, ${stats.flagged} cảnh báo, ${stats.unchanged} giữ nguyên`);
+    this.store.log(project.id, "ss→wh", `v${input.version.number ?? "?"}: +${stats.created} tạo, ${stats.updated} cập nhật, ${stats.flagged} cảnh báo, ${stats.deleted} xoá, ${stats.unchanged} giữ nguyên`);
     return { workhub: this.workhubRef(this.store.project(project.id)!), ...stats, provisioned, design };
+  }
+
+  /** Deletes an issue whatever its state: sub-tasks first, out of its open sprint, then the issue itself. True when it is gone. */
+  private async deleteIssueDeep(pat: string, issueId: string, depth = 0): Promise<boolean> {
+    try {
+      const d = await this.wh.call(pat, "GET", `/api/issues/${issueId}`);
+      const issue = d.issue ?? d;
+      for (const c of d.children ?? []) {
+        if (depth < 6 && !(await this.deleteIssueDeep(pat, c.id, depth + 1))) return false;
+      }
+      if (issue.sprint && !["COMPLETED", "CANCELLED"].includes(issue.sprint.status)) {
+        await this.wh.call(pat, "DELETE", `/api/sprints/${issue.sprint.id}/issues/${issueId}`);
+      }
+      await this.wh.call(pat, "DELETE", `/api/issues/${issueId}`);
+      return true;
+    } catch (e) {
+      if (e instanceof WorkHubError && e.status === 404) return true;
+      return false;
+    }
+  }
+
+  /** Deletes a WorkHub issue only if it is safe: untouched (TO_DO), not in a sprint, no children. True when it is gone. */
+  private async tryDeleteIssue(pat: string, issueId: string): Promise<boolean> {
+    try {
+      const d = await this.wh.call(pat, "GET", `/api/issues/${issueId}`);
+      const issue = d.issue ?? d;
+      if (issue.deleted) return true;
+      if (issue.status !== "TO_DO" || issue.sprint || (issue.childCount ?? 0) > 0) return false;
+      await this.wh.call(pat, "DELETE", `/api/issues/${issueId}`);
+      return true;
+    } catch (e) {
+      if (e instanceof WorkHubError && e.status === 404) return true; // already gone
+      return false;
+    }
   }
 
   private async ensureEpic(pat: string, pid: string, ssProjectId: string, name: string) {
@@ -284,7 +337,7 @@ export class SyncEngine {
     return issue;
   }
 
-  private async updateIssue(pat: string, issueId: string, c: ReturnType<typeof toIssueContent>, parentId: string | null, version?: string) {
+  private async updateIssue(pat: string, issueId: string, c: ReturnType<typeof toIssueContent>, parentId: string | null, version?: string, quiet = false) {
     const detail = await this.wh.call(pat, "GET", `/api/issues/${issueId}`);
     const cur = detail.issue;
     await this.wh.call(pat, "PUT", `/api/issues/${issueId}`, {
@@ -302,7 +355,7 @@ export class SyncEngine {
       acceptanceCriteria: c.acceptanceCriteria || null,
       labels: cur.labels,
     });
-    await this.wh
+    if (!quiet) await this.wh
       .call(pat, "POST", `/api/issues/${issueId}/comments`, {
         body: `🔄 Đặc tả trong SmartSpec đã thay đổi${version ? ` (phiên bản ${version})` : ""}. Mô tả và tiêu chí chấp nhận đã được cập nhật — hãy kiểm tra lại phần đã làm.`,
         mentions: [],
@@ -581,6 +634,88 @@ export class SyncEngine {
     };
   }
 
+  // ---------- use cases created / edited in WorkHub → SmartSpec ----------
+
+  /** issue id → last `updatedAt` we have dealt with, so unchanged stories cost no detail request. */
+  private seenUpdated = new Map<string, string>();
+
+  /**
+   * Stories (USER_STORY) created in WorkHub become use cases; edits to linked stories (title, priority, description,
+   * goal, flow, expected results…) are written back to the use case. SmartSpec stays the tie-breaker: its own changes
+   * overwrite WorkHub on the next outbound sync. Afterwards the WorkHub text is rewritten in the canonical layout, quietly.
+   */
+  async pullSpec(ssProjectId: string): Promise<number> {
+    return this.serial(ssProjectId, () => this.doPullSpec(ssProjectId));
+  }
+
+  private async doPullSpec(ssProjectId: string): Promise<number> {
+    const link = this.store.project(ssProjectId);
+    if (!link || link.paused || link.archived || !this.store.user(link.owner_ss_user_id)) return 0;
+    const pat = this.pat(link.owner_ss_user_id);
+    const list: any[] = [];
+    for (let page = 0, pages = 1; page < pages && page < 50; page++) {
+      const res = await this.wh.call(pat, "GET", `/api/projects/${link.wh_project_id}/issues?size=100&page=${page}`);
+      pages = res.totalPages ?? 1;
+      list.push(...(res.items ?? []));
+    }
+    const linked = new Map(this.store.entities(ssProjectId, "usecase").filter((e) => !e.removed).map((e) => [e.wh_issue_id, e]));
+    let changed = 0;
+    for (const it of list) {
+      if (it.type !== "USER_STORY" || it.deletedAt) continue;
+      const e = linked.get(it.id);
+      if (!e && String(it.externalRef ?? "").startsWith("smartspec:")) continue;
+      const key = `${ssProjectId}:${it.id}`;
+      if (e && this.seenUpdated.get(key) === it.updatedAt) continue;
+      try {
+        const detail = (await this.wh.call(pat, "GET", `/api/issues/${it.id}`)).issue;
+        const done = e ? await this.applyEdit(link, pat, e, detail) : await this.createFromStory(link, pat, detail);
+        if (done) changed++;
+        // our own rewrite bumps updatedAt: remember the value after it
+        const after = (await this.wh.call(pat, "GET", `/api/issues/${it.id}`)).issue;
+        this.seenUpdated.set(key, after.updatedAt);
+      } catch (err: any) {
+        console.warn(`pullSpec ${it.key} failed:`, err?.message ?? err);
+        this.seenUpdated.set(key, it.updatedAt); // do not retry every minute; the next edit retries
+      }
+    }
+    return changed;
+  }
+
+  private async applyEdit(link: ProjectLink, pat: string, e: EntityLink, issue: any): Promise<boolean> {
+    if (!e.spec_json) return false;
+    const spec = JSON.parse(e.spec_json) as SsUsecase;
+    const parsed = parseStory(issue);
+    const patch = diffStory(parsed, spec);
+    if (!Object.keys(patch).length) return false;
+    const r = await this.ss("/api/integrations/workhub/usecase-upsert", { ssProjectId: link.ss_project_id, actorSsUserId: link.owner_ss_user_id, key: e.ss_key, fields: patch });
+    if (!r.ok) { this.store.log(link.ss_project_id, "wh→ss", `không cập nhật được use case từ ${e.wh_key}: ${r.reason ?? "lỗi"}`); return false; }
+    const next = r.usecase as SsUsecase;
+    const content = toIssueContent(next);
+    this.store.setSpec(link.ss_project_id, "usecase", e.ss_key, next);
+    this.store.upsertEntity({ ...e, content_hash: contentHash(content), removed: 0 });
+    const epicId = content.type === "EPIC" ? null : this.store.entity(link.ss_project_id, "module", moduleSlug(content.module))?.wh_issue_id ?? issue.parent?.id ?? null;
+    await this.updateIssue(pat, e.wh_issue_id, content, epicId, undefined, true);
+    this.store.log(link.ss_project_id, "wh→ss", `${e.wh_key} sửa ở WorkHub → cập nhật use case (${Object.keys(patch).join(", ")})`);
+    return true;
+  }
+
+  private async createFromStory(link: ProjectLink, pat: string, issue: any): Promise<boolean> {
+    const parsed = parseStory(issue);
+    const module = String(issue.epic?.title ?? "").trim();
+    const r = await this.ss("/api/integrations/workhub/usecase-upsert", { ssProjectId: link.ss_project_id, actorSsUserId: link.owner_ss_user_id, fields: { ...parsed, module: module || undefined } });
+    if (!r.ok || !r.usecase) { this.store.log(link.ss_project_id, "wh→ss", `không tạo được use case từ ${issue.key}: ${r.reason ?? "lỗi"}`); return false; }
+    const spec = r.usecase as SsUsecase;
+    const content = toIssueContent(spec);
+    const issueRow = { ss_project_id: link.ss_project_id, kind: "usecase" as const, ss_key: spec.key, wh_issue_id: issue.id as string, wh_key: issue.key as string, content_hash: contentHash(content), wh_status: issue.status as string };
+    this.store.upsertEntity(issueRow);
+    this.store.setSpec(link.ss_project_id, "usecase", spec.key, spec);
+    this.store.setProgressJson(link.ss_project_id, spec.key, JSON.stringify(toProgress(issue, this.cfg.workhubPublic)), issue.status, null, null, false);
+    const { id: epicId } = await this.ensureEpic(pat, link.wh_project_id, link.ss_project_id, content.module);
+    await this.updateIssue(pat, issue.id, content, epicId, undefined, true);
+    this.store.log(link.ss_project_id, "wh→ss", `${issue.key} tạo ở WorkHub → tạo use case "${spec.name}"`);
+    return true;
+  }
+
   // ---------- project name/description/members (both directions) and projects created in WorkHub ----------
 
   private async ss(path: string, body: unknown): Promise<any> {
@@ -600,18 +735,52 @@ export class SyncEngine {
    */
   async syncProjectMeta(ssProjectId: string): Promise<boolean> {
     const link = this.store.project(ssProjectId);
-    if (!link || link.paused || link.archived || !this.store.user(link.owner_ss_user_id)) return false;
+    if (!link || link.paused || !this.store.user(link.owner_ss_user_id)) return false;
     const pat = this.pat(link.owner_ss_user_id);
-    const p = await this.wh.call(pat, "GET", `/api/projects/${link.wh_project_id}`);
-    if (p.status === "ARCHIVED") return false;
-    const members: any[] = await this.wh.call(pat, "GET", `/api/projects/${link.wh_project_id}/members`).catch(() => []);
+    let p: any;
+    try {
+      p = await this.wh.call(pat, "GET", `/api/projects/${link.wh_project_id}`);
+    } catch (e) {
+      if (e instanceof WorkHubError && [403, 404].includes(e.status)) {
+        // deleted in WorkHub (its team/workspace was deleted): the SmartSpec project goes to the trash and the link is retired
+        await this.ss("/api/integrations/workhub/project-upsert", { ssProjectId, whDeleted: true });
+        this.store.setPaused(ssProjectId, true);
+        this.store.log(ssProjectId, "wh→ss", "dự án đã bị xoá ở WorkHub → chuyển vào thùng rác SmartSpec");
+        return true;
+      }
+      throw e;
+    }
+    const whArchived = p.status === "ARCHIVED";
+    if (whArchived && !link.archived) {
+      // archived in WorkHub ("deleting" a project there): the SmartSpec project goes to the trash
+      await this.ss("/api/integrations/workhub/project-upsert", { ssProjectId, whArchived: true });
+      this.store.setArchived(ssProjectId, true, null);
+      this.store.log(ssProjectId, "wh→ss", "dự án lưu trữ ở WorkHub → chuyển vào thùng rác SmartSpec");
+      return true;
+    }
+    if (!whArchived && link.archived) {
+      await this.ss("/api/integrations/workhub/project-upsert", { ssProjectId, whRestored: true });
+      this.store.setArchived(ssProjectId, false, null);
+      this.store.log(ssProjectId, "wh→ss", "dự án mở lại ở WorkHub → khôi phục ở SmartSpec");
+    }
+    if (whArchived) return false;
+    let membersOk = true;
+    const members: any[] = await this.wh.call(pat, "GET", `/api/projects/${link.wh_project_id}/members`).catch(() => { membersOk = false; return []; });
+    // people we added to the WorkHub project who are no longer in it (removed there): they leave the SmartSpec project too
+    const whEmails = new Set(members.map((m) => String(m.email).toLowerCase()));
+    const gone = membersOk ? this.store.memberLinks(ssProjectId).filter((r) => r.wh_user_id && !whEmails.has(String(r.email).toLowerCase())) : [];
     const whName = String(p.name ?? ""), whDesc = String(p.description ?? "");
     const r = await this.ss("/api/integrations/workhub/project-upsert", {
       ssProjectId,
       wh: { name: whName, description: whDesc },
       base: link.base_name == null ? null : { name: link.base_name, description: link.base_desc ?? "" },
       members: members.map((m) => ({ email: m.email, role: m.role })),
+      removeEmails: gone.map((r) => r.email),
     });
+    for (const r of gone) {
+      this.store.deleteMemberLink(ssProjectId, r.email);
+      this.store.log(ssProjectId, "wh→ss", `${r.email} bị gỡ khỏi dự án WorkHub → gỡ khỏi SmartSpec`);
+    }
     const name = String(r.name ?? whName), desc = String(r.description ?? whDesc);
     let changed = !!r.changed;
     if (name !== whName || desc !== whDesc) {
