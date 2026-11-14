@@ -49,6 +49,15 @@ export class WorkHubClient {
     return this.cache.get(pat)!.user;
   }
 
+  /** Is this e-mail/password valid in WorkHub? (used so one account works in both systems) */
+  verifyIdentity(email: string, password: string) {
+    return this.raw("POST", "/api/integrations/identity/verify", { email, password }) as Promise<{ status: "ok" | "wrong_password" | "not_found"; fullName?: string; emailVerified?: boolean; passwordChangedAt?: string }>;
+  }
+
+  setIdentityPassword(email: string, password: string) {
+    return this.raw("POST", "/api/integrations/identity/set-password", { email, password });
+  }
+
   private async access(pat: string): Promise<string> {
     const hit = this.cache.get(pat);
     if (hit && hit.exp > Date.now() + 30_000) return hit.token;

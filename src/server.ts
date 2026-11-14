@@ -41,6 +41,37 @@ export function createServer(cfg: Config, engine: SyncEngine, reconciler: Reconc
 
   app.use(express.json({ limit: "20mb" }));
 
+  // WorkHub changed a password: pass it on to SmartSpec.
+  app.post("/identity/smartspec/set-password", async (req, res) => {
+    if (!safeEqual(String(req.header("x-integration-key") ?? ""), cfg.webhookSecret)) return void res.status(401).end();
+    try {
+      await fetch(`${cfg.smartspecApi}/api/integrations/workhub/identity/set-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Bridge-Key": cfg.secret },
+        body: JSON.stringify({ email: req.body?.email, password: req.body?.password }),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch { /* SmartSpec is down: it will adopt the newer password on its next sign-in */ }
+    res.status(204).end();
+  });
+
+  // One account for both systems. WorkHub asks SmartSpec (here) whether an e-mail/password pair is valid there.
+  app.post("/identity/smartspec/verify", async (req, res) => {
+    if (!safeEqual(String(req.header("x-integration-key") ?? ""), cfg.webhookSecret)) return void res.status(401).json({ status: "unavailable" });
+    try {
+      const r = await fetch(`${cfg.smartspecApi}/api/integrations/workhub/identity/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Bridge-Key": cfg.secret },
+        body: JSON.stringify({ email: req.body?.email, password: req.body?.password }),
+        signal: AbortSignal.timeout(5000),
+      });
+      const d: any = r.ok ? await r.json() : { status: "unavailable" };
+      res.json({ status: d.status ?? "unavailable", fullName: d.name, emailVerified: d.emailVerified, passwordChangedAt: d.passwordChangedAt });
+    } catch {
+      res.json({ status: "unavailable" });
+    }
+  });
+
   app.get("/health", (_req, res) => void res.json({ ok: true }));
 
   app.use("/ide", ideRouter(cfg, store, wh));
@@ -53,6 +84,22 @@ export function createServer(cfg: Config, engine: SyncEngine, reconciler: Reconc
 
   const h = (fn: (req: Request, res: Response) => Promise<unknown> | unknown) => (req: Request, res: Response, next: NextFunction) =>
     Promise.resolve(fn(req, res)).catch(next);
+
+  // SmartSpec asks whether an e-mail/password pair is valid in WorkHub.
+  app.post("/v1/identity/workhub/verify", h(async (req, res) => {
+    try {
+      const r = await wh.verifyIdentity(String(req.body?.email ?? ""), String(req.body?.password ?? ""));
+      res.json({ status: r.status, name: r.fullName, emailVerified: r.emailVerified, passwordChangedAt: r.passwordChangedAt });
+    } catch {
+      res.json({ status: "unavailable" });
+    }
+  }));
+
+  // SmartSpec changed a password: pass it on to WorkHub.
+  app.post("/v1/identity/workhub/set-password", h(async (req, res) => {
+    try { await wh.setIdentityPassword(String(req.body?.email ?? ""), String(req.body?.password ?? "")); } catch { /* WorkHub is down: adopted on next sign-in */ }
+    res.status(204).end();
+  }));
 
   app.get("/v1/users/:id", h((req, res) => res.json(engine.userStatus(String(req.params.id)))));
 

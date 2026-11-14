@@ -10,7 +10,11 @@ ROOT="${FORGE_ROOT:-$(cd "$BRIDGE_DIR/.." && pwd)}"
 RUN="${FORGE_RUN_DIR:-$ROOT/.forge-run}"
 mkdir -p "$RUN"
 
-# Development-only secrets. Override them (export before running) outside local development.
+# Values come from the .env files (ForgeBridge/.env, SmartSpec/backend/.env, WorkHub/.env, SmartSpec/frontend/.env).
+# The two secrets shared between services are read from ForgeBridge/.env and injected into the others, so they always match.
+envval() { [ -f "$2" ] && grep -E "^$1=" "$2" | tail -1 | cut -d= -f2- || true; }
+BRIDGE_SECRET="${BRIDGE_SECRET:-$(envval BRIDGE_SECRET "$BRIDGE_DIR/.env")}"
+WEBHOOK_SECRET="${WEBHOOK_SECRET:-$(envval WORKHUB_WEBHOOK_SECRET "$BRIDGE_DIR/.env")}"
 BRIDGE_SECRET="${BRIDGE_SECRET:-dev-only-bridge-secret-change-me}"
 WEBHOOK_SECRET="${WEBHOOK_SECRET:-dev-only-webhook-secret}"
 
@@ -35,17 +39,27 @@ case "${1:-}" in
     sleep 8
 
     start_one workhub-backend "$ROOT/WorkHub/backend" env SPRING_PROFILES_ACTIVE=postgres RATE_LIMIT_ENABLED=false \
-      INTEGRATION_WEBHOOK_URL=http://localhost:8090/webhooks/workhub INTEGRATION_WEBHOOK_SECRET="$WEBHOOK_SECRET" ./mvnw -q spring-boot:run
+      INTEGRATION_WEBHOOK_URL=http://localhost:8090/webhooks/workhub INTEGRATION_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+      INTEGRATION_IDENTITY_URL=http://localhost:8090/identity/smartspec/verify ./mvnw -q spring-boot:run
     start_one workhub-frontend "$ROOT/WorkHub/frontend" npx vite
-    start_one forgebridge "$BRIDGE_DIR" env PORT=8090 BRIDGE_SECRET="$BRIDGE_SECRET" WORKHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-      WORKHUB_API_URL=http://localhost:8080 WORKHUB_PUBLIC_URL=http://localhost:5173 SMARTSPEC_API_URL=http://localhost:8000 npx tsx src/main.ts
-    start_one smartspec-backend "$ROOT/SmartSpec/backend" env PORT=8000 DEV=true CLIENT_URL=http://localhost:5174 \
-      'MONGO_URI=mongodb://localhost:27017/smartspec?directConnection=true' REDIS_URI=redis://localhost:6488 \
-      JWT_SECRET="${SS_JWT_SECRET:-dev-jwt-access-secret-change-me}" JWT_REFRESH_SECRET="${SS_JWT_REFRESH_SECRET:-dev-jwt-refresh-secret-change-me}" \
-      JWT_OTP_SECRET=dev-jwt-otp-secret JWT_EMAIL_SECRET=dev-jwt-email-secret UPLOADS_PATH=./uploads \
-      GOOGLE_OAUTH_CLIENT_ID="${GOOGLE_OAUTH_CLIENT_ID:-unset}" GOOGLE_OAUTH_CLIENT_SECRET="${GOOGLE_OAUTH_CLIENT_SECRET:-unset}" \
-      GOOGLE_OAUTH_REDIRECT_URL=http://localhost:8000/api/auth/google/oauth \
-      BRIDGE_URL=http://localhost:8090 BRIDGE_SECRET="$BRIDGE_SECRET" npx ts-node executable/command-ingress/main.ts
+    if [ -f "$BRIDGE_DIR/.env" ]; then
+      start_one forgebridge "$BRIDGE_DIR" npx tsx --env-file=.env src/main.ts
+    else
+      start_one forgebridge "$BRIDGE_DIR" env PORT=8090 BRIDGE_SECRET="$BRIDGE_SECRET" WORKHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+        WORKHUB_API_URL=http://localhost:8080 WORKHUB_PUBLIC_URL=http://localhost:5173 SMARTSPEC_API_URL=http://localhost:8000 npx tsx src/main.ts
+    fi
+    if [ -f "$ROOT/SmartSpec/backend/.env" ]; then
+      # everything else (database, JWT, email, Google…) is read from backend/.env by the app itself
+      start_one smartspec-backend "$ROOT/SmartSpec/backend" env BRIDGE_SECRET="$BRIDGE_SECRET" npx ts-node executable/command-ingress/main.ts
+    else
+      echo "  ! SmartSpec/backend/.env is missing — using throw-away development defaults (email will not work)"
+      start_one smartspec-backend "$ROOT/SmartSpec/backend" env PORT=8000 DEV=true CLIENT_URL=http://localhost:5174 \
+        'MONGO_URI=mongodb://localhost:27017/smartspec?directConnection=true' REDIS_URI=redis://localhost:6488 \
+        JWT_SECRET=dev-jwt-access-secret JWT_REFRESH_SECRET=dev-jwt-refresh-secret JWT_OTP_SECRET=dev-jwt-otp-secret JWT_EMAIL_SECRET=dev-jwt-email-secret \
+        UPLOADS_PATH=./uploads GOOGLE_OAUTH_CLIENT_ID=unset GOOGLE_OAUTH_CLIENT_SECRET=unset \
+        GOOGLE_OAUTH_REDIRECT_URL=http://localhost:8000/api/auth/google/oauth BRIDGE_URL=http://localhost:8090 BRIDGE_SECRET="$BRIDGE_SECRET" \
+        npx ts-node executable/command-ingress/main.ts
+    fi
     start_one smartspec-frontend "$ROOT/SmartSpec/frontend" env VITE_API_TARGET=http://localhost:8000 npx vite
 
     wait_http workhub-backend http://localhost:8080/actuator/health 120

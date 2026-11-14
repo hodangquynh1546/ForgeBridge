@@ -18,6 +18,9 @@ Repo này gồm dịch vụ Bridge (gốc) và extension VS Code (`vscode-extens
 ## Thiết kế → Tài liệu WorkHub
 Mỗi lần đồng bộ, SmartSpec gửi kèm các tài liệu sinh từ thiết kế (xem `docs/lifecycle.md`): **SRS**, từng **use case/activity/sequence diagram** (Mermaid), **thiết kế CSDL** (ERD + từ điển + DDL PostgreSQL), **kế hoạch & kết quả kiểm thử**. Bridge tạo thư mục `SmartSpec/…` trong tab Tài liệu, tạo/cập nhật theo hash (mỗi lần đổi là một phiên bản), gắn tài liệu vào task của use case liên quan, lưu trữ tài liệu của sơ đồ đã bị xoá. WorkHub vẽ sơ đồ Mermaid ngay trong tài liệu. Mọi thay đổi sơ đồ/CSDL/test case trong SmartSpec (mọi đường ghi, nhờ hook ở model) tự kích hoạt đồng bộ có debounce. IDE: `GET /ide/issues/:key/design`, MCP `forge_get_design`, lệnh *Forge: Xem thiết kế*.
 
+## Tài khoản dùng chung
+Bridge chuyển hai lời hỏi giữa hai hệ thống (không lưu mật khẩu): `POST /v1/identity/workhub/verify` và `/v1/identity/workhub/set-password` (SmartSpec → WorkHub), `POST /identity/smartspec/verify` và `/identity/smartspec/set-password` (WorkHub → SmartSpec, xác thực bằng `X-Integration-Key`). WorkHub cần `INTEGRATION_IDENTITY_URL=http://localhost:8090/identity/smartspec/verify`. Đăng ký ở một bên thì đăng nhập được ở bên kia (tài khoản được tạo khi đăng nhập lần đầu); đổi mật khẩu ở một bên được đẩy sang bên kia ngay, và dấu thời gian `password_changed_at` ngăn mật khẩu cũ sống lại. Kiểm thử: `scripts/e2e-accounts.cjs`.
+
 ## Vòng đời liên kết (khoá tài liệu, tạm dừng, thùng rác, huỷ liên kết)
 `POST /v1/projects/:id/pause`, `/archive`, `/restore`, `DELETE /v1/users/:id` — chi tiết trong `docs/lifecycle.md`. Tài liệu do SmartSpec quản lý chỉ đọc ở WorkHub (khoá bằng `X-Integration-Key`; hai bên phải dùng **cùng** secret webhook).
 
@@ -43,7 +46,7 @@ cp .env.example .env   # đặt BRIDGE_SECRET, WORKHUB_WEBHOOK_SECRET
 npm install
 npm start              # :8090   (Node ≥ 22.13, dùng node:sqlite)
 npm test && npm run typecheck
-node scripts/e2e-full.cjs && node scripts/e2e-bugs.cjs && node scripts/e2e-design.cjs && node scripts/e2e-lifecycle.cjs # kiểm tra toàn bộ luồng, cần cả 4 dịch vụ đang chạy (xem bên dưới)
+node scripts/e2e-full.cjs && node scripts/e2e-bugs.cjs && node scripts/e2e-design.cjs && node scripts/e2e-lifecycle.cjs && node scripts/e2e-accounts.cjs # kiểm tra toàn bộ luồng, cần cả 4 dịch vụ đang chạy (xem bên dưới)
 npm run mcp            # MCP server (stdio) cho Claude Code / Copilot
 ```
 
