@@ -1,0 +1,49 @@
+{
+  "name": "forge-vscode",
+  "displayName": "Forge: SmartSpec + WorkHub",
+  "description": "Task của bạn từ WorkHub cùng đặc tả SmartSpec gốc, ngay trong VS Code.",
+  "version": "0.1.0",
+  "publisher": "forgeai",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [{ "id": "forge", "title": "Forge", "icon": "$(checklist)" }]
+    },
+    "views": {
+      "forge": [{ "id": "forge.tasks", "name": "Việc của tôi" }]
+    },
+    "viewsWelcome": [
+      { "view": "forge.tasks", "contents": "Chưa đăng nhập WorkHub.\n[Đăng nhập Forge](command:forge.login)" }
+    ],
+    "commands": [
+      { "command": "forge.login", "title": "Forge: Đăng nhập WorkHub" },
+      { "command": "forge.logout", "title": "Forge: Đăng xuất" },
+      { "command": "forge.refresh", "title": "Forge: Làm mới task", "icon": "$(refresh)" },
+      { "command": "forge.openTask", "title": "Forge: Xem task và đặc tả" },
+      { "command": "forge.setStatus", "title": "Forge: Đổi trạng thái task" },
+      { "command": "forge.startTask", "title": "Forge: Bắt đầu task (tạo branch + chuyển Đang làm)" },
+      { "command": "forge.openInWorkHub", "title": "Forge: Mở trong WorkHub" },
+      { "command": "forge.comment", "title": "Forge: Bình luận vào task" }
+    ],
+    "menus": {
+      "view/title": [{ "command": "forge.refresh", "when": "view == forge.tasks", "group": "navigation" }],
+      "view/item/context": [
+        { "command": "forge.startTask", "when": "view == forge.tasks && viewItem == task", "group": "inline" },
+        { "command": "forge.setStatus", "when": "view == forge.tasks && viewItem == task" },
+        { "command": "forge.openInWorkHub", "when": "view == forge.tasks && viewItem == task" },
+        { "command": "forge.comment", "when": "view == forge.tasks && viewItem == task" }
+      ]
+    },
+    "configuration": {
+      "title": "Forge",
+      "properties": {
+        "forge.bridgeUrl": { "type": "string", "default": "http://localhost:8090", "description": "Địa chỉ ForgeBridge" },
+        "forge.workhubUrl": { "type": "string", "default": "http://localhost:8080", "description": "Địa chỉ API WorkHub (dùng khi đăng nhập)" },
+        "forge.refreshSeconds": { "type": "number", "default": 30, "description": "Tự làm mới danh sách task sau mỗi N giây (0 = tắt)" }
+      }
+    }
+  }
+}
