@@ -17,7 +17,8 @@ WEBHOOK_SECRET="${WEBHOOK_SECRET:-dev-only-webhook-secret}"
 start_one() { # name, dir, command...
   local name="$1" dir="$2"; shift 2
   if [ -f "$RUN/$name.pid" ] && kill -0 "$(cat "$RUN/$name.pid")" 2>/dev/null; then echo "• $name already running"; return; fi
-  (cd "$dir" && nohup "$@" > "$RUN/$name.log" 2>&1 & echo $! > "$RUN/$name.pid")
+  # `;` (not &&) so only nohup is backgrounded: a backgrounded `cd && …` list would keep our stdout pipe open
+  (cd "$dir" || exit 1; nohup "$@" > "$RUN/$name.log" 2>&1 < /dev/null & echo $! > "$RUN/$name.pid")
   echo "• started $name (log: $RUN/$name.log)"
 }
 
