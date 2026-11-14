@@ -47,6 +47,7 @@ export interface SyncResult {
   flagged: number;
   unchanged: number;
   provisioned: boolean;
+  paused?: boolean;
   design?: { created: number; updated: number; archived: number };
 }
 
@@ -101,9 +102,28 @@ export class SyncEngine {
       email: r.user.email,
       full_name: r.user.fullName,
       token_enc: encrypt(r.token, this.cfg.secret),
+      token_id: r.tokenId,
     });
     const joined = await this.acceptPendingInvitations(input.ssUserId).catch(() => 0);
     return { email: r.user.email, fullName: r.user.fullName, registered: r.registered, projectsJoined: joined };
+  }
+
+  /**
+   * Revokes the integration token in WorkHub and forgets the link. Tasks, documents and project mappings stay (nothing
+   * is deleted in WorkHub); projects this person owned wait for someone else's link or for them to link again.
+   */
+  async unlinkUser(ssUserId: string) {
+    const u = this.store.user(ssUserId);
+    if (!u) return { unlinked: false, projects: 0 };
+    if (u.token_id) {
+      try {
+        await this.wh.call(decrypt(u.token_enc, this.cfg.secret), "DELETE", `/api/integrations/tokens/${u.token_id}`);
+      } catch (e) {
+        if (!(e instanceof WorkHubError && [401, 404].includes(e.status))) throw e; // already revoked is fine
+      }
+    }
+    this.store.deleteUser(ssUserId);
+    return { unlinked: true, projects: this.store.projectsOwnedBy(ssUserId).length };
   }
 
   userStatus(ssUserId: string) {
@@ -153,6 +173,9 @@ export class SyncEngine {
     this.pat(input.actorSsUserId); // fail fast when the actor has no link
     let link = this.store.project(project.id);
     let provisioned = false;
+    if (link?.paused) {
+      return { workhub: this.workhubRef(link), created: 0, updated: 0, flagged: 0, unchanged: 0, provisioned: false, paused: true };
+    }
     if (!link) {
       link = await this.provision(input);
       provisioned = true;
@@ -368,12 +391,13 @@ export class SyncEngine {
     const folders: { id: string; parentId: string | null; name: string }[] = (await this.wh.call(pat, "GET", `/api/projects/${pid}/document-folders`)).map((f: any) => ({ id: f.id, parentId: f.parentId ?? null, name: f.name }));
     const stat = { created: 0, updated: 0, archived: 0 };
     const seen = new Set<string>();
+    const ref = (key: string) => `smartspec:design/${ssId}/${key}`; // marks the document as managed by SmartSpec (read-only for people)
     const issueIdOf = (key: string) => this.store.entity(ssId, "usecase", key)?.wh_issue_id;
 
     for (const d of docs) {
       seen.add(d.key);
       const folderId = await this.ensureFolder(pat, pid, d.folder, folders);
-      const hash = sha256([d.title, d.type, d.folder.join("/"), d.markdown].join("\u0000"));
+      const hash = sha256(["managed-v2", d.title, d.type, d.folder.join("/"), d.markdown].join("\u0000")); // salt: re-saves documents created before they were tagged as managed
       let row = this.store.designLink(ssId, d.key);
       let docId = row?.wh_doc_id;
       let changed = false;
@@ -383,7 +407,7 @@ export class SyncEngine {
         if (docId) row = { ...row, archived: 0, content_hash: "" }; // force an update after unarchiving
       }
       if (!docId) {
-        const created = await this.wh.call(pat, "POST", `/api/projects/${pid}/documents`, { title: d.title, type: d.type, folderId, content: d.markdown });
+        const created = await this.wh.call(pat, "POST", `/api/projects/${pid}/documents`, { title: d.title, type: d.type, folderId, content: d.markdown, externalRef: ref(d.key) });
         docId = created.id as string;
         stat.created++;
         changed = true;
@@ -392,13 +416,13 @@ export class SyncEngine {
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const cur = await this.wh.call(pat, "GET", `/api/documents/${docId}`);
-            await this.wh.call(pat, "PUT", `/api/documents/${docId}`, { title: d.title, type: d.type, folderId, content: d.markdown, baseVersion: cur.version, note: `Đồng bộ từ SmartSpec${version ? ` (phiên bản ${version})` : ""}` });
+            await this.wh.call(pat, "PUT", `/api/documents/${docId}`, { title: d.title, type: d.type, folderId, content: d.markdown, externalRef: ref(d.key), baseVersion: cur.version, note: `Đồng bộ từ SmartSpec${version ? ` (phiên bản ${version})` : ""}` });
             stat.updated++;
             changed = true;
             break;
           } catch (e) {
             if (e instanceof WorkHubError && e.status === 404) {
-              const created = await this.wh.call(pat, "POST", `/api/projects/${pid}/documents`, { title: d.title, type: d.type, folderId, content: d.markdown });
+              const created = await this.wh.call(pat, "POST", `/api/projects/${pid}/documents`, { title: d.title, type: d.type, folderId, content: d.markdown, externalRef: ref(d.key) });
               docId = created.id as string;
               row = undefined;
               stat.created++;
@@ -516,7 +540,7 @@ export class SyncEngine {
 
   private async doPull(ssProjectId: string): Promise<ProgressBatch | null> {
     const link = this.store.project(ssProjectId);
-    if (!link || !this.store.user(link.owner_ss_user_id)) return null;
+    if (!link || link.paused || !this.store.user(link.owner_ss_user_id)) return null;
     const pat = this.pat(link.owner_ss_user_id);
     const byId = new Map<string, any>();
     for (let page = 0, pages = 1; page < pages && page < 50; page++) {
@@ -709,6 +733,39 @@ export class SyncEngine {
     return progress;
   }
 
+  // ---------- lifecycle of the link (pause, trash, restore) ----------
+
+  /** Stops syncing in both directions without touching anything in WorkHub; resuming picks up where it left off. */
+  setPaused(ssProjectId: string, paused: boolean) {
+    if (!this.store.project(ssProjectId)) throw new NotFoundError("Dự án chưa được đồng bộ sang WorkHub");
+    this.store.setPaused(ssProjectId, paused);
+    this.store.log(ssProjectId, "ss→wh", paused ? "Tạm dừng đồng bộ" : "Tiếp tục đồng bộ");
+  }
+
+  /** SmartSpec project went to the trash: make the WorkHub project read-only (ARCHIVED), remembering its status. */
+  async archiveProject(ssProjectId: string) {
+    const link = this.store.project(ssProjectId);
+    if (!link) return { archived: false };
+    if (link.archived) return { archived: true };
+    const pat = this.pat(link.owner_ss_user_id);
+    const cur = await this.wh.call(pat, "GET", `/api/projects/${link.wh_project_id}`);
+    if (cur.status !== "ARCHIVED") await this.wh.call(pat, "PUT", `/api/projects/${link.wh_project_id}/status`, { status: "ARCHIVED" });
+    this.store.setArchived(ssProjectId, true, cur.status === "ARCHIVED" ? null : cur.status);
+    this.store.log(ssProjectId, "ss→wh", "Dự án vào thùng rác → lưu trữ dự án WorkHub");
+    return { archived: true };
+  }
+
+  /** SmartSpec project restored from the trash: give the WorkHub project its previous status back. */
+  async restoreProject(ssProjectId: string) {
+    const link = this.store.project(ssProjectId);
+    if (!link || !link.archived) return { restored: false };
+    const pat = this.pat(link.owner_ss_user_id);
+    if (link.wh_prev_status) await this.wh.call(pat, "PUT", `/api/projects/${link.wh_project_id}/status`, { status: link.wh_prev_status });
+    this.store.setArchived(ssProjectId, false, null);
+    this.store.log(ssProjectId, "ss→wh", "Khôi phục khỏi thùng rác → mở lại dự án WorkHub");
+    return { restored: true };
+  }
+
   // ---------- reads for the SmartSpec UI ----------
 
   private workhubRef(l: { wh_workspace_id: string; wh_team_id: string; wh_project_id: string; wh_project_key: string }): WorkhubRef {
@@ -733,6 +790,8 @@ export class SyncEngine {
       workhub: this.workhubRef(l),
       lastSyncedAt: l.last_synced_at,
       lastVersion: l.last_version,
+      paused: !!l.paused,
+      archived: !!l.archived,
       items,
       log: this.store.recentLog(ssProjectId, 10),
     };

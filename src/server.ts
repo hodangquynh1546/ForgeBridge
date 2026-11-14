@@ -98,6 +98,14 @@ export function createServer(cfg: Config, engine: SyncEngine, reconciler: Reconc
     res.json(await engine.recreate(String(req.params.id), String(req.params.key)));
   }));
 
+  app.post("/v1/projects/:id/pause", h((req, res) => {
+    engine.setPaused(String(req.params.id), !!req.body?.paused);
+    res.json({ paused: !!req.body?.paused });
+  }));
+  app.post("/v1/projects/:id/archive", h(async (req, res) => res.json(await engine.archiveProject(String(req.params.id)))));
+  app.post("/v1/projects/:id/restore", h(async (req, res) => res.json(await engine.restoreProject(String(req.params.id)))));
+  app.delete("/v1/users/:id", h(async (req, res) => res.json(await engine.unlinkUser(String(req.params.id)))));
+
   app.post("/v1/projects/:id/reconcile", h(async (req, res) => {
     res.json({ changed: await reconciler.run(String(req.params.id), true) });
   }));

@@ -72,8 +72,13 @@ export function openDb(path: string): Db {
       summary TEXT NOT NULL
     );
   `);
-  for (const col of ['spec_json TEXT', 'progress_json TEXT']) {
-    try { db.exec(`ALTER TABLE entity_links ADD COLUMN ${col}`); } catch { /* column exists */ }
-  }
+  const addColumns = (table: string, cols: string[]) => {
+    for (const col of cols) {
+      try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`); } catch { /* column exists */ }
+    }
+  };
+  addColumns('entity_links', ['spec_json TEXT', 'progress_json TEXT']);
+  addColumns('project_links', ['paused INTEGER NOT NULL DEFAULT 0', 'archived INTEGER NOT NULL DEFAULT 0', 'wh_prev_status TEXT']);
+  addColumns('user_links', ['token_id TEXT']);
   return db;
 }

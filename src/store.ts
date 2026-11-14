@@ -7,6 +7,7 @@ export interface UserLink {
   full_name: string | null;
   token_enc: string;
   wh_workspace_id: string | null;
+  token_id: string | null;
 }
 export interface ProjectLink {
   ss_project_id: string;
@@ -17,6 +18,9 @@ export interface ProjectLink {
   wh_project_key: string;
   last_synced_at: string | null;
   last_version: string | null;
+  paused: number;
+  archived: number;
+  wh_prev_status: string | null;
 }
 export interface DesignLink {
   ss_project_id: string;
@@ -54,16 +58,16 @@ export class Store {
   user(ssUserId: string) {
     return this.db.prepare("SELECT * FROM user_links WHERE ss_user_id = ?").get(ssUserId) as unknown as UserLink | undefined;
   }
-  saveUser(u: Omit<UserLink, "wh_workspace_id"> & { wh_workspace_id?: string | null }) {
+  saveUser(u: Omit<UserLink, "wh_workspace_id" | "token_id"> & { wh_workspace_id?: string | null; token_id?: string | null }) {
     this.db
       .prepare(
-        `INSERT INTO user_links (ss_user_id, wh_user_id, email, full_name, token_enc, wh_workspace_id, created_at)
-         VALUES (?,?,?,?,?,?,?)
+        `INSERT INTO user_links (ss_user_id, wh_user_id, email, full_name, token_enc, wh_workspace_id, created_at, token_id)
+         VALUES (?,?,?,?,?,?,?,?)
          ON CONFLICT(ss_user_id) DO UPDATE SET wh_user_id=excluded.wh_user_id, email=excluded.email,
-           full_name=excluded.full_name, token_enc=excluded.token_enc,
+           full_name=excluded.full_name, token_enc=excluded.token_enc, token_id=excluded.token_id,
            wh_workspace_id=CASE WHEN user_links.wh_user_id = excluded.wh_user_id THEN user_links.wh_workspace_id ELSE NULL END`,
       )
-      .run(u.ss_user_id, u.wh_user_id, u.email, u.full_name, u.token_enc, u.wh_workspace_id ?? null, now());
+      .run(u.ss_user_id, u.wh_user_id, u.email, u.full_name, u.token_enc, u.wh_workspace_id ?? null, now(), u.token_id ?? null);
   }
   setUserWorkspace(ssUserId: string, workspaceId: string) {
     this.db.prepare("UPDATE user_links SET wh_workspace_id = ? WHERE ss_user_id = ?").run(workspaceId, ssUserId);
@@ -75,7 +79,7 @@ export class Store {
   project(ssProjectId: string) {
     return this.db.prepare("SELECT * FROM project_links WHERE ss_project_id = ?").get(ssProjectId) as unknown as ProjectLink | undefined;
   }
-  saveProject(p: Omit<ProjectLink, "last_synced_at" | "last_version">) {
+  saveProject(p: Omit<ProjectLink, "last_synced_at" | "last_version" | "paused" | "archived" | "wh_prev_status">) {
     this.db
       .prepare(
         `INSERT INTO project_links (ss_project_id, owner_ss_user_id, wh_workspace_id, wh_team_id, wh_project_id, wh_project_key, created_at)
@@ -85,6 +89,15 @@ export class Store {
   }
   markSynced(ssProjectId: string, version: string) {
     this.db.prepare("UPDATE project_links SET last_synced_at = ?, last_version = ? WHERE ss_project_id = ?").run(now(), version, ssProjectId);
+  }
+  setPaused(ssProjectId: string, paused: boolean) {
+    this.db.prepare("UPDATE project_links SET paused = ? WHERE ss_project_id = ?").run(paused ? 1 : 0, ssProjectId);
+  }
+  setArchived(ssProjectId: string, archived: boolean, prevStatus: string | null) {
+    this.db.prepare("UPDATE project_links SET archived = ?, wh_prev_status = ? WHERE ss_project_id = ?").run(archived ? 1 : 0, prevStatus, ssProjectId);
+  }
+  projectsOwnedBy(ssUserId: string) {
+    return this.db.prepare("SELECT * FROM project_links WHERE owner_ss_user_id = ?").all(ssUserId) as unknown as ProjectLink[];
   }
   setOwner(ssProjectId: string, ssUserId: string) {
     this.db.prepare("UPDATE project_links SET owner_ss_user_id = ? WHERE ss_project_id = ?").run(ssUserId, ssProjectId);

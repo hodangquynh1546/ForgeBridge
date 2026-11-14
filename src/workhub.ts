@@ -12,7 +12,7 @@ type Access = { token: string; exp: number; user: { id: string; email: string; f
 export class WorkHubClient {
   private cache = new Map<string, Access>();
 
-  constructor(private cfg: Pick<Config, "workhubApi">) {}
+  constructor(private cfg: Pick<Config, "workhubApi" | "webhookSecret">) {}
 
   private async raw(method: string, path: string, body?: unknown, bearer?: string): Promise<any> {
     const res = await fetch(this.cfg.workhubApi + path, {
@@ -20,6 +20,8 @@ export class WorkHubClient {
       headers: {
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+        // proves the request comes from the integration: WorkHub lets it change documents that people may not
+        "X-Integration-Key": this.cfg.webhookSecret,
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
@@ -35,6 +37,7 @@ export class WorkHubClient {
   connect(input: { email: string; password: string; register?: boolean; fullName?: string }) {
     return this.raw("POST", "/api/integrations/connect", { ...input, tokenName: "ForgeBridge" }) as Promise<{
       token: string;
+      tokenId: string;
       user: { id: string; email: string; fullName: string };
       registered: boolean;
     }>;

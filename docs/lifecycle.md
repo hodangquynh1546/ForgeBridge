@@ -26,9 +26,14 @@ Nguyên tắc: **mỗi loại dữ liệu có đúng một chủ sở hữu**, b
 - **Quyền**: viewer của SmartSpec không đổi được trạng thái; hành động ghi nhận theo tài khoản WorkHub của người làm nếu họ đã liên kết, nếu không thì theo chủ dự án.
 - **Độ bền**: WorkHub ghi outbox bền, Bridge đọc lại trạng thái thật, và quét đối soát mỗi 5 phút.
 
+## Vòng đời của liên kết
+- **Tài liệu do SmartSpec quản lý là chỉ đọc ở WorkHub.** Bridge gửi `X-Integration-Key` (cùng giá trị `INTEGRATION_WEBHOOK_SECRET`/`WORKHUB_WEBHOOK_SECRET`) và gắn `externalRef = smartspec:design/<dự án>/<khoá>`; WorkHub từ chối sửa/lưu trữ/xoá/soạn thảo cộng tác bởi người (403 `DOCUMENT_MANAGED`). Vẫn xem được lịch sử phiên bản và **đính kèm tệp** (ví dụ wireframe). Chưa đặt secret thì khoá tắt (dev).
+- **Tạm dừng đồng bộ một dự án** (chỉ chủ dự án, menu ⋯ trên chip WorkHub): hai chiều dừng, không xoá gì ở WorkHub; tiếp tục thì áp dụng mọi thay đổi đang chờ.
+- **Thùng rác SmartSpec**: dự án WorkHub chuyển **ARCHIVED** (chỉ đọc, nhớ trạng thái cũ); **khôi phục** thì trả lại trạng thái cũ rồi đồng bộ tiếp. Xoá hẳn ở SmartSpec không xoá gì ở WorkHub.
+- **Huỷ liên kết tài khoản WorkHub** (menu ⋯): token tích hợp bị thu hồi ở WorkHub, task/tài liệu đã tạo giữ nguyên; dự án người đó từng sở hữu chờ người khác liên kết hoặc họ liên kết lại.
+
 ## Chưa bao phủ / cần quyết định
-1. **UI/UX** — SmartSpec chưa có module thiết kế giao diện nên chưa có gì để đồng bộ.
-2. **Xoá/khôi phục dự án SmartSpec (thùng rác)** — dự án WorkHub giữ nguyên; chưa tự lưu trữ.
-3. **Huỷ liên kết WorkHub** — chưa có nút; token Bridge giữ cho tới khi thu hồi.
-4. **Mermaid trong VS Code** — preview Markdown mặc định không vẽ Mermaid (cần extension); mở trong WorkHub để xem sơ đồ.
-5. **PlantUML** — SmartSpec xuất được PlantUML cho vài sơ đồ; WorkHub hiện chỉ vẽ Mermaid.
+1. **UI/UX** — SmartSpec chưa có module thiết kế giao diện nên chưa có gì để đồng bộ (wireframe có thể đính kèm tay vào tài liệu WorkHub).
+2. **Mermaid trong VS Code** — preview Markdown mặc định không vẽ Mermaid (cần extension); mở trong WorkHub để xem sơ đồ.
+3. **PlantUML** — WorkHub chỉ vẽ Mermaid.
+4. **Nội dung issue** (tiêu đề/mô tả của task sinh từ spec) vẫn sửa tay được ở WorkHub và sẽ bị ghi đè khi spec đổi (có banner cảnh báo); chưa khoá như tài liệu.

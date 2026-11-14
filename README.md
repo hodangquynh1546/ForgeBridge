@@ -18,6 +18,9 @@ Repo này gồm dịch vụ Bridge (gốc) và extension VS Code (`vscode-extens
 ## Thiết kế → Tài liệu WorkHub
 Mỗi lần đồng bộ, SmartSpec gửi kèm các tài liệu sinh từ thiết kế (xem `docs/lifecycle.md`): **SRS**, từng **use case/activity/sequence diagram** (Mermaid), **thiết kế CSDL** (ERD + từ điển + DDL PostgreSQL), **kế hoạch & kết quả kiểm thử**. Bridge tạo thư mục `SmartSpec/…` trong tab Tài liệu, tạo/cập nhật theo hash (mỗi lần đổi là một phiên bản), gắn tài liệu vào task của use case liên quan, lưu trữ tài liệu của sơ đồ đã bị xoá. WorkHub vẽ sơ đồ Mermaid ngay trong tài liệu. Mọi thay đổi sơ đồ/CSDL/test case trong SmartSpec (mọi đường ghi, nhờ hook ở model) tự kích hoạt đồng bộ có debounce. IDE: `GET /ide/issues/:key/design`, MCP `forge_get_design`, lệnh *Forge: Xem thiết kế*.
 
+## Vòng đời liên kết (khoá tài liệu, tạm dừng, thùng rác, huỷ liên kết)
+`POST /v1/projects/:id/pause`, `/archive`, `/restore`, `DELETE /v1/users/:id` — chi tiết trong `docs/lifecycle.md`. Tài liệu do SmartSpec quản lý chỉ đọc ở WorkHub (khoá bằng `X-Integration-Key`; hai bên phải dùng **cùng** secret webhook).
+
 ## Test case → Bug, thành viên, Git
 - **Test case thất bại → Bug** (`POST /v1/testcases/report`, SmartSpec gọi sau mỗi lần chạy): tạo Bug trong WorkHub (ưu tiên theo severity, nằm dưới Epic của module, có các bước/kỳ vọng/thực tế, trỏ về use case liên quan). Chạy lại vẫn lỗi → bình luận vào bug đó (không tạo trùng); bug đã DONE mà test lại lỗi → **mở lại** về TO_DO; test đạt → ghi chú để người xác nhận đóng bug. Có thể đổi trạng thái bug ngay trên test case (`POST /v1/projects/:id/testcases/:key/status`, đi qua WorkHub). Trạng thái bug hiện ngay trên test case (badge) và trên thẻ task của use case.
 - **Thành viên**: chỉ những người Bridge đã mời mới bị gỡ/đổi vai trò khi họ rời hoặc đổi vai trò ở SmartSpec; người được thêm tay trong WorkHub không bị đụng tới.
@@ -40,11 +43,13 @@ cp .env.example .env   # đặt BRIDGE_SECRET, WORKHUB_WEBHOOK_SECRET
 npm install
 npm start              # :8090   (Node ≥ 22.13, dùng node:sqlite)
 npm test && npm run typecheck
-node scripts/e2e-full.cjs && node scripts/e2e-bugs.cjs && node scripts/e2e-design.cjs # kiểm tra toàn bộ luồng, cần cả 4 dịch vụ đang chạy (xem bên dưới)
+node scripts/e2e-full.cjs && node scripts/e2e-bugs.cjs && node scripts/e2e-design.cjs && node scripts/e2e-lifecycle.cjs # kiểm tra toàn bộ luồng, cần cả 4 dịch vụ đang chạy (xem bên dưới)
 npm run mcp            # MCP server (stdio) cho Claude Code / Copilot
 ```
 
-Thứ tự bật cả hệ thống (local):
+**Cách nhanh:** `scripts/dev-all.sh start` (bật Mongo/Redis/Postgres bằng Docker + 5 dịch vụ; `stop`, `status`, `logs <tên>`). Dữ liệu nằm trong volume Docker và `ForgeBridge/data` nên còn sau khi tắt. Đổi secret mặc định bằng biến môi trường trước khi chạy ở môi trường thật.
+
+Thứ tự bật thủ công (local):
 1. `SmartSpec`: `docker compose up -d`, backend `npm run dev` (:8000), frontend `npm run dev` (:**5174**).
 2. `WorkHub`: `INTEGRATION_WEBHOOK_URL=http://localhost:8090/webhooks/workhub INTEGRATION_WEBHOOK_SECRET=<cùng WORKHUB_WEBHOOK_SECRET> ./mvnw spring-boot:run` (:8080), frontend (:5173).
 3. `ForgeBridge`: `npm start` (:8090). `BRIDGE_SECRET` phải trùng `BRIDGE_SECRET` của SmartSpec backend.
